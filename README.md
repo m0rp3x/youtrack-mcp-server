@@ -1,4 +1,4 @@
-# youtrack-mcp
+# youtrack-mcp-server
 
 A small [Model Context Protocol](https://modelcontextprotocol.io) server for
 **JetBrains YouTrack**. It lets Claude (Claude Code / Claude Desktop), Cursor and
@@ -167,8 +167,8 @@ Once configured, just talk to your client:
 ## Development
 
 ```bash
-git clone https://github.com/m0rp3x/youtrack-mcp
-cd youtrack-mcp
+git clone https://github.com/m0rp3x/youtrack-mcp-server
+cd youtrack-mcp-server
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
