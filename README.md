@@ -10,6 +10,8 @@ Ships with two ready-to-use Claude Code **skills** (`youtrack`,
 
 - ✅ No secrets in the repo — you pass `YOUTRACK_URL` / `YOUTRACK_TOKEN` via your client.
 - ✅ Acts as the token's user, bounded by that user's YouTrack permissions.
+- ✅ **Multi-agent**: a `youtrack-admin` CLI provisions a YouTrack account + token
+  per agent, so several agents can each work under their own identity.
 - ✅ Async, typed, tested; MIT licensed.
 
 ## Tools
@@ -97,6 +99,60 @@ cp -r skills/youtrack skills/youtrack-standup ~/.claude/skills/
 ```
 
 (or the project-local `.claude/skills/`). They're plain `SKILL.md` files — no build step.
+
+## Multiple agents
+
+Each agent gets its own YouTrack account + token. The MCP server itself is
+identity-less — identity comes from the `YOUTRACK_TOKEN` you pass in `env`. To
+run N agents, give each its own MCP server entry with its own token.
+
+### Provision accounts — `youtrack-admin`
+
+The package ships a second console script for provisioning. It needs an **admin**
+token (owned by a user allowed to create users):
+
+```bash
+export YOUTRACK_URL=https://your-youtrack.example.com
+export YOUTRACK_ADMIN_TOKEN=perm-...     # an admin's permanent token
+
+youtrack-admin create-agent agent-alpha --name "Agent Alpha" --print-config
+youtrack-admin create-agent researcher --role contributor
+youtrack-admin list-agents
+youtrack-admin revoke-agent agent-alpha            # ban
+youtrack-admin revoke-agent agent-alpha --delete   # hard delete
+```
+
+`create-agent` creates (or reuses — it's idempotent) the account, grants a global
+role, mints a permanent token, and prints it **once**. With `--print-config` it
+also prints a ready-to-paste MCP block. Roles: `contributor` (default),
+`observer`, `project-admin`, `admin`. A token can never exceed its user's role.
+
+Then give each agent its own server block in that agent's MCP client config:
+
+```json
+{
+  "mcpServers": {
+    "youtrack-alpha": {
+      "command": "uvx", "args": ["youtrack-mcp"],
+      "env": { "YOUTRACK_URL": "https://…", "YOUTRACK_TOKEN": "perm-alpha…" }
+    },
+    "youtrack-beta": {
+      "command": "uvx", "args": ["youtrack-mcp"],
+      "env": { "YOUTRACK_URL": "https://…", "YOUTRACK_TOKEN": "perm-beta…" }
+    }
+  }
+}
+```
+
+### Assigning tasks to agents
+
+A global role lets an agent **create and work on** issues in every project. To
+make an agent **assignable** (so `my_issues` / `for: <agent>` works) it must be a
+member of the project's **team** — add it in the YouTrack UI (Project → Team), or
+have agents scope their work by `created by: <agent>` or a shared tag instead.
+
+> ⏳ Permissions propagate a few seconds after a role is granted, so an agent's
+> very first write may return 403 and succeed on retry.
 
 ## Usage examples
 

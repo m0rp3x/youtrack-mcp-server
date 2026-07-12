@@ -39,6 +39,7 @@ Issues = "https://github.com/m0rp3x/youtrack-mcp/issues"
 
 [project.scripts]
 youtrack-mcp = "youtrack_mcp.server:main"
+youtrack-admin = "youtrack_mcp.admin_cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["youtrack_mcp"]
