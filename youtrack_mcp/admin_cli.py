@@ -39,7 +39,7 @@ def _mcp_config(url: str, login: str, token: str) -> str:
         "mcpServers": {
             f"youtrack-{login}": {
                 "command": "uvx",
-                "args": ["youtrack-mcp"],
+                "args": ["youtrack-mcp-server"],
                 "env": {"YOUTRACK_URL": url, "YOUTRACK_TOKEN": token},
             }
         }

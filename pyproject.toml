@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "youtrack-mcp"
+name = "youtrack-mcp-server"
 version = "0.1.0"
 description = "Model Context Protocol (MCP) server for JetBrains YouTrack — let Claude and other MCP clients read, create and resolve your issues."
 readme = "README.md"
@@ -38,6 +38,9 @@ Repository = "https://github.com/m0rp3x/youtrack-mcp"
 Issues = "https://github.com/m0rp3x/youtrack-mcp/issues"
 
 [project.scripts]
+# `youtrack-mcp-server` matches the PyPI name so `uvx youtrack-mcp-server` just works;
+# `youtrack-mcp` is a short alias for the same entry point.
+youtrack-mcp-server = "youtrack_mcp.server:main"
 youtrack-mcp = "youtrack_mcp.server:main"
 youtrack-admin = "youtrack_mcp.admin_cli:main"
 

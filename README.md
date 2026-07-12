@@ -47,7 +47,7 @@ Add to your Claude Code MCP config (`.mcp.json` in a project, or user scope):
   "mcpServers": {
     "youtrack": {
       "command": "uvx",
-      "args": ["youtrack-mcp"],
+      "args": ["youtrack-mcp-server"],
       "env": {
         "YOUTRACK_URL": "https://your-youtrack.example.com",
         "YOUTRACK_TOKEN": "perm-XXXX.YYYY.ZZZZ"
@@ -83,7 +83,7 @@ same `mcpServers` block as above, then restart Claude Desktop.
 ### Cursor / other MCP clients
 
 Any client that speaks MCP over stdio works — configure a server whose command is
-`uvx youtrack-mcp` (or `python -m youtrack_mcp.server`) with the two env vars.
+`uvx youtrack-mcp-server` (or `python -m youtrack_mcp.server`) with the two env vars.
 
 ## Skills (Claude Code)
 
@@ -133,11 +133,11 @@ Then give each agent its own server block in that agent's MCP client config:
 {
   "mcpServers": {
     "youtrack-alpha": {
-      "command": "uvx", "args": ["youtrack-mcp"],
+      "command": "uvx", "args": ["youtrack-mcp-server"],
       "env": { "YOUTRACK_URL": "https://…", "YOUTRACK_TOKEN": "perm-alpha…" }
     },
     "youtrack-beta": {
-      "command": "uvx", "args": ["youtrack-mcp"],
+      "command": "uvx", "args": ["youtrack-mcp-server"],
       "env": { "YOUTRACK_URL": "https://…", "YOUTRACK_TOKEN": "perm-beta…" }
     }
   }
@@ -184,7 +184,7 @@ python -m youtrack_mcp.server     # serves MCP over stdio
 To inspect the tools interactively, run it under the MCP Inspector:
 
 ```bash
-npx @modelcontextprotocol/inspector uvx youtrack-mcp
+npx @modelcontextprotocol/inspector uvx youtrack-mcp-server
 ```
 
 ## Publishing (maintainers)
@@ -192,7 +192,7 @@ npx @modelcontextprotocol/inspector uvx youtrack-mcp
 ```bash
 pip install build twine
 python -m build            # -> dist/*.whl, *.tar.gz
-twine upload dist/*        # publish to PyPI so users can `uvx youtrack-mcp`
+twine upload dist/*        # publish to PyPI so users can `uvx youtrack-mcp-server`
 ```
 
 ## Security notes
