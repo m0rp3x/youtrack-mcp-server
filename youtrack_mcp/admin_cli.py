@@ -20,7 +20,15 @@ import json
 import os
 import sys
 
-from .admin import AdminClient, AdminError
+from .admin import AdminClient, AdminError, LicenseLimitError
+
+#: Distinct, non-zero process exit codes per LicenseLimitError.status so that
+#: calling code (an orchestrator shelling out to this CLI) can distinguish
+#: the two cases programmatically without parsing stderr text.
+_LICENSE_EXIT_CODES = {
+    "LICENSE_LIMIT_LIKELY": 2,
+    "ALREADY_BANNED": 3,
+}
 
 
 def _admin_client() -> AdminClient:
@@ -131,6 +139,12 @@ def main() -> None:
     args = build_parser().parse_args()
     try:
         asyncio.run(args.func(args))
+    except LicenseLimitError as exc:
+        # Structured, machine-checkable signal: a stable "status:" line plus
+        # a status-specific exit code — not just free text in the message.
+        print(f"status: {exc.status}", file=sys.stderr)
+        print(f"error: {exc}", file=sys.stderr)
+        sys.exit(_LICENSE_EXIT_CODES[exc.status])
     except AdminError as exc:
         sys.exit(f"error: {exc}")
 

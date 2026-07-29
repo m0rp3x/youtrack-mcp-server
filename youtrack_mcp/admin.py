@@ -46,10 +46,48 @@ class Agent:
     name: str
     user_id: str
     token: str
+    banned: bool = False
+    newly_created: bool = False
 
 
 class AdminError(RuntimeError):
     """Raised when a Hub admin API call fails."""
+
+
+#: Machine-readable status codes for :class:`LicenseLimitError`.
+LICENSE_LIMIT_LIKELY = "LICENSE_LIMIT_LIKELY"
+ALREADY_BANNED = "ALREADY_BANNED"
+
+
+class LicenseLimitError(AdminError):
+    """Raised when provisioning hits a licensing/seat problem.
+
+    Hub does not expose a reliable pre-check quota endpoint, so this is a
+    post-hoc, best-effort signal based on the ``banned`` field Hub itself sets
+    on the user record (see :meth:`AdminClient.create_user`):
+
+    * ``LICENSE_LIMIT_LIKELY`` — a *new* user was just created and came back
+      already ``banned``; the most common cause is the licensed seat limit
+      being exceeded at creation time. It is a "likely" cause, not a
+      guarantee, since Hub does not return a distinct error code for this.
+    * ``ALREADY_BANNED`` — provisioning was requested for a login that
+      already exists and is already banned (e.g. a previous provisioning
+      attempt hit the seat limit, or the account was banned for another
+      reason). No new user/role/token mutation is attempted in this case.
+
+    Attributes:
+        status: One of ``LICENSE_LIMIT_LIKELY`` / ``ALREADY_BANNED`` — check
+            this instead of parsing ``str(exc)`` to distinguish the cases
+            programmatically.
+        login: The login that was being provisioned.
+        user_id: The Hub user id, if known.
+    """
+
+    def __init__(self, status: str, login: str, user_id: str | None = None) -> None:
+        self.status = status
+        self.login = login
+        self.user_id = user_id
+        super().__init__(f"{status}: user '{login}' is banned (user_id={user_id})")
 
 
 class AdminClient:
@@ -176,7 +214,7 @@ class AdminClient:
                 "email": {"type": "EmailUserProfileAttribute", "email": email, "verified": True}
             }
         return await self._request(
-            "POST", "users", params={"fields": "id,login,name"}, json=body
+            "POST", "users", params={"fields": "id,login,name,banned"}, json=body
         )
 
     async def ensure_global_role(self, user_id: str, role_key: str) -> None:
@@ -232,12 +270,34 @@ class AdminClient:
             name: Display name.
             role: Friendly role name (see :data:`ROLE_KEYS`); default ``contributor``.
             email: Optional email (placeholder is fine for token-only agents).
+
+        Raises:
+            LicenseLimitError: The account is banned. Hub itself sets
+                ``banned`` on the user record — this is a post-hoc signal, not
+                a pre-check, since Hub has no reliable cross-edition quota
+                endpoint (see ADR #3243 §3). Status is ``LICENSE_LIMIT_LIKELY``
+                when a brand-new user came back banned (likely a seat-limit
+                hit at creation), or ``ALREADY_BANNED`` when re-provisioning a
+                login that was already banned. No role/token mutation is
+                attempted in either case.
         """
         role_key = ROLE_KEYS.get(role, role)
         user = await self.find_user(login)
+        newly_created = user is None
         if user is None:
             user = await self.create_user(login, name, email)
         user_id = user["id"]
+        banned = bool(user.get("banned", False))
+        if banned:
+            status = LICENSE_LIMIT_LIKELY if newly_created else ALREADY_BANNED
+            raise LicenseLimitError(status, login=login, user_id=user_id)
         await self.ensure_global_role(user_id, role_key)
         token = await self.create_token(user_id, name=f"mcp-{login}")
-        return Agent(login=login, name=name, user_id=user_id, token=token)
+        return Agent(
+            login=login,
+            name=name,
+            user_id=user_id,
+            token=token,
+            banned=False,
+            newly_created=newly_created,
+        )
