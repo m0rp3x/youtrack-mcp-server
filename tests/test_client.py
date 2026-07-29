@@ -74,3 +74,23 @@ async def test_error_status_raises():
     with pytest.raises(YouTrackError):
         await client.me()
     await client.aclose()
+
+
+async def test_create_issue_error_message_is_descriptive():
+    client = _make_client(
+        lambda req: httpx.Response(422, text="Entity fields validation failed")
+    )
+    with pytest.raises(YouTrackError, match="422 POST /issues") as exc_info:
+        await client.create_issue("NOPE", "hi")
+    await client.aclose()
+
+    assert "Entity fields validation failed" in str(exc_info.value)
+
+
+async def test_search_issues_error_message_is_descriptive():
+    client = _make_client(lambda req: httpx.Response(400, text="Incorrect query syntax"))
+    with pytest.raises(YouTrackError, match="400 GET /issues") as exc_info:
+        await client.search_issues("not a valid query (")
+    await client.aclose()
+
+    assert "Incorrect query syntax" in str(exc_info.value)
