@@ -179,3 +179,57 @@ async def test_error_status_raises():
     with pytest.raises(YouTrackError):
         await client.me()
     await client.aclose()
+
+
+async def test_list_projects_hides_archived_by_default():
+    """include_archived defaults to False, so an archived project in the API
+    response must be filtered out client-side before it reaches callers."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=[
+                {"shortName": "DEMO", "name": "Demo project", "archived": False},
+                {"shortName": "OLD", "name": "Retired project", "archived": True},
+            ],
+        )
+
+    client = _make_client(handler)
+    projects = await client.list_projects()
+    await client.aclose()
+
+    assert [p["shortName"] for p in projects] == ["DEMO"]
+
+
+async def test_list_projects_include_archived_returns_everything():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=[
+                {"shortName": "DEMO", "name": "Demo project", "archived": False},
+                {"shortName": "OLD", "name": "Retired project", "archived": True},
+            ],
+        )
+
+    client = _make_client(handler)
+    projects = await client.list_projects(include_archived=True)
+    await client.aclose()
+
+    assert {p["shortName"] for p in projects} == {"DEMO", "OLD"}
+
+
+async def test_list_projects_requests_archived_field():
+    """The ``archived`` field must be requested explicitly, else YouTrack omits
+    it and the archived filter above would silently do nothing."""
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["fields"] = dict(request.url.params)["fields"]
+        return httpx.Response(200, json=[])
+
+    client = _make_client(handler)
+    await client.list_projects()
+    await client.aclose()
+
+    assert "archived" in seen["fields"]
+    assert "shortName" in seen["fields"]
