@@ -69,6 +69,111 @@ async def test_create_issue_body():
     assert issue["idReadable"] == "DEMO-42"
 
 
+async def test_apply_command_body_for_status_change():
+    """apply_command is the workflow-validated way to change an issue's State
+    (POST /api/commands), same endpoint the ``run_command`` tool wraps.
+    """
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json
+
+        seen["path"] = request.url.path
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={})
+
+    client = _make_client(handler)
+    await client.apply_command("State Done", ["DEMO-12"], "closing this")
+    await client.aclose()
+
+    assert seen["path"] == "/api/commands"
+    assert seen["body"]["query"] == "State Done"
+    assert seen["body"]["issues"] == [{"idReadable": "DEMO-12"}]
+    assert seen["body"]["comment"] == "closing this"
+
+
+async def test_apply_command_omits_comment_when_not_given():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json
+
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={})
+
+    client = _make_client(handler)
+    await client.apply_command("State Done", ["DEMO-12"])
+    await client.aclose()
+
+    assert "comment" not in seen["body"]
+
+
+async def test_apply_command_multiple_issues():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json
+
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={})
+
+    client = _make_client(handler)
+    await client.apply_command("Priority Critical", ["DEMO-12", "DEMO-13"])
+    await client.aclose()
+
+    assert seen["body"]["issues"] == [
+        {"idReadable": "DEMO-12"},
+        {"idReadable": "DEMO-13"},
+    ]
+
+
+async def test_apply_command_invalid_transition_raises():
+    """YouTrack rejects a command that names a state outside the issue's
+    workflow (e.g. a State value that doesn't exist for the project) with a
+    non-2xx response; the client surfaces this as YouTrackError rather than
+    silently swallowing it, so the workflow validation done server-side by
+    YouTrack is not bypassed.
+    """
+    client = _make_client(
+        lambda req: httpx.Response(
+            400, json={"error_description": "Value 'Bogus' is not valid for field State"}
+        )
+    )
+    with pytest.raises(YouTrackError, match="Bogus"):
+        await client.apply_command("State Bogus", ["DEMO-12"])
+    await client.aclose()
+
+
+async def test_add_comment_body():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json
+
+        seen["path"] = request.url.path
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={"id": "4-1", "text": "hello", "author": {"login": "klod"}},
+        )
+
+    client = _make_client(handler)
+    comment = await client.add_comment("DEMO-12", "hello")
+    await client.aclose()
+
+    assert seen["path"] == "/api/issues/DEMO-12/comments"
+    assert seen["body"] == {"text": "hello"}
+    assert comment["id"] == "4-1"
+    assert comment["text"] == "hello"
+
+
+async def test_add_comment_permission_error_raises():
+    client = _make_client(lambda req: httpx.Response(403, text="Forbidden: Create Comment"))
+    with pytest.raises(YouTrackError):
+        await client.add_comment("DEMO-12", "hello")
+    await client.aclose()
+
+
 async def test_error_status_raises():
     client = _make_client(lambda req: httpx.Response(403, text="Forbidden"))
     with pytest.raises(YouTrackError):
