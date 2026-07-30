@@ -1,5 +1,7 @@
 """Client tests using a stubbed httpx transport (no real network)."""
 
+import logging
+
 import httpx
 import pytest
 
@@ -179,6 +181,25 @@ async def test_error_status_raises():
     with pytest.raises(YouTrackError):
         await client.me()
     await client.aclose()
+
+
+async def test_error_response_body_is_logged_for_debugging(caplog):
+    """4xx/5xx responses must land the full response body in the log so an
+    incident can be diagnosed from logs alone, not just the truncated
+    exception message."""
+    client = _make_client(
+        lambda req: httpx.Response(
+            500, json={"error": "internal", "detail": "issue index is stale, retry later"}
+        )
+    )
+    caplog.set_level(logging.ERROR)
+
+    with pytest.raises(YouTrackError):
+        await client.me()
+    await client.aclose()
+
+    assert "issue index is stale, retry later" in caplog.text
+    assert "500" in caplog.text
 
 
 async def test_list_projects_hides_archived_by_default():
