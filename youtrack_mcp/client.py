@@ -7,7 +7,9 @@ for humans/LLMs lives in :mod:`youtrack_mcp.formatting`.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import random
 from typing import Any
 
 import httpx
@@ -16,7 +18,33 @@ from .redact import redact_text
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_TIMEOUT = 30.0
+# connect/pool fail fast (unreachable host shouldn't block a synchronous MCP
+# tool-call for 30s); read stays generous since large project searches/reports
+# can legitimately take a while on YouTrack's side. See ADR-0002 §5.
+DEFAULT_TIMEOUT = httpx.Timeout(connect=5.0, read=30.0, write=10.0, pool=5.0)
+
+#: Total attempt budget per request: 1 initial try + 2 retries. See ADR-0002 §3.
+_MAX_ATTEMPTS = 3
+#: Backoff before attempt 2 and attempt 3 respectively, before jitter.
+_BACKOFF_SCHEDULE = (0.5, 1.0)
+_JITTER_FRACTION = 0.2
+#: If a 429's Retry-After asks for longer than this, fail fast instead of
+#: blocking the synchronous MCP tool-call.
+_RETRY_AFTER_CEILING = 10.0
+
+#: Any of these are safe to retry on a GET: the request has no side effects.
+_RETRYABLE_ON_READ = (
+    httpx.ConnectError,
+    httpx.ConnectTimeout,
+    httpx.ReadTimeout,
+    httpx.PoolTimeout,
+    httpx.RemoteProtocolError,
+)
+#: For a side-effecting POST, only retry errors where the request is known not
+#: to have reached the server (connection never established). A ReadTimeout or
+#: RemoteProtocolError on a POST means we can't tell if it was already applied,
+#: so those are fatal instead of risking a duplicate issue/command.
+_RETRYABLE_ON_WRITE = (httpx.ConnectError, httpx.ConnectTimeout)
 
 #: Field selectors used whenever we fetch issues. YouTrack returns nothing
 #: unless fields are requested explicitly, so keep these in one place.
@@ -52,7 +80,11 @@ class YouTrackClient:
         base_url: Base URL of the YouTrack instance, e.g. ``https://yt.example.com``
             (with or without a trailing slash; the ``/api`` prefix is added here).
         token: A YouTrack permanent token (``perm-…``).
-        timeout: Per-request timeout in seconds.
+        timeout: Per-request timeout. Either a single number of seconds applied
+            uniformly to every phase (kept for backwards compatibility, e.g.
+            existing tests that pass a plain ``float``), or an ``httpx.Timeout``
+            to set connect/read/write/pool independently. Defaults to
+            :data:`DEFAULT_TIMEOUT`.
         transport: Optional ``httpx`` transport, used by the test-suite to stub
             network access.
     """
@@ -62,7 +94,7 @@ class YouTrackClient:
         base_url: str,
         token: str,
         *,
-        timeout: float = DEFAULT_TIMEOUT,
+        timeout: float | httpx.Timeout = DEFAULT_TIMEOUT,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
@@ -103,6 +135,21 @@ class YouTrackClient:
             await self._client.aclose()
             self._client = None
 
+    def _log_error_response(self, method: str, path: str, resp: httpx.Response) -> str:
+        """Log the full (redacted) error body and return the same redacted text.
+
+        The exception message re-uses this redacted text so a secret can't
+        leak via either the log or the exception path -- only the
+        log-vs-exception body length changed (no more silent 500-char
+        truncation), not what's masked. See #3602.
+        """
+        redacted_body = redact_text(resp.text)
+        logger.error(
+            "YouTrack API error: %s %s /%s -> %s: %s",
+            method, self.api_url, path, resp.status_code, redacted_body,
+        )
+        return redacted_body
+
     async def _request(
         self,
         method: str,
@@ -111,18 +158,91 @@ class YouTrackClient:
         params: dict[str, Any] | None = None,
         json: Any | None = None,
     ) -> Any:
-        resp = await self._http().request(method, path, params=params, json=json)
-        if resp.status_code >= 400:
-            redacted_body = redact_text(resp.text)
-            # Full body (redacted) goes to the log for debugging; the exception
-            # message re-uses the same redacted text so a secret can't leak via
-            # either path.
-            logger.error(
-                "YouTrack API error: %s %s /%s -> %s: %s",
-                method, self.api_url, path, resp.status_code, redacted_body,
-            )
-            raise YouTrackError(f"{resp.status_code} {method} /{path}: {redacted_body}")
-        return resp.json() if resp.content else None
+        """Perform one HTTP call, retrying transient failures per ADR-0002.
+
+        GET is idempotent and retries any network error or 5xx. A
+        side-effecting method (POST) only retries errors known to have
+        happened before the request reached the server (``ConnectError``/
+        ``ConnectTimeout``); a ``ReadTimeout`` or 5xx there is raised
+        immediately since a retry risks duplicating the side effect. ``429``
+        always retries (a rejection by the rate limiter can't have applied
+        any side effect), honouring ``Retry-After`` up to a ceiling so a
+        synchronous MCP tool-call never blocks for longer than that.
+        """
+        is_get = method.upper() == "GET"
+        retryable_network_errors = _RETRYABLE_ON_READ if is_get else _RETRYABLE_ON_WRITE
+
+        for attempt in range(1, _MAX_ATTEMPTS + 1):
+            try:
+                resp = await self._http().request(method, path, params=params, json=json)
+            except _RETRYABLE_ON_READ as exc:
+                if not isinstance(exc, retryable_network_errors) or attempt == _MAX_ATTEMPTS:
+                    raise YouTrackError(
+                        f"{method} /{path} failed on attempt {attempt}/{_MAX_ATTEMPTS} "
+                        f"(not retried further): {exc!r}"
+                    ) from exc
+                await self._sleep_before_retry(attempt)
+                continue
+
+            if resp.status_code == 429:
+                retry_after = self._retry_after_seconds(resp)
+                if retry_after is not None and retry_after > _RETRY_AFTER_CEILING:
+                    body = self._log_error_response(method, path, resp)
+                    raise YouTrackError(
+                        f"429 {method} /{path}: rate limited, Retry-After="
+                        f"{retry_after:.0f}s exceeds {_RETRY_AFTER_CEILING:.0f}s ceiling, "
+                        f"not waiting: {body}"
+                    )
+                if attempt == _MAX_ATTEMPTS:
+                    body = self._log_error_response(method, path, resp)
+                    raise YouTrackError(
+                        f"429 {method} /{path}: rate limited, retry budget exhausted "
+                        f"after {attempt} attempt(s): {body}"
+                    )
+                if retry_after is not None:
+                    await asyncio.sleep(retry_after)
+                else:
+                    await self._sleep_before_retry(attempt)
+                continue
+
+            if resp.status_code >= 500:
+                if not is_get or attempt == _MAX_ATTEMPTS:
+                    body = self._log_error_response(method, path, resp)
+                    raise YouTrackError(
+                        f"{resp.status_code} {method} /{path} "
+                        f"(attempt {attempt}/{_MAX_ATTEMPTS}): {body}"
+                    )
+                await self._sleep_before_retry(attempt)
+                continue
+
+            if resp.status_code >= 400:
+                body = self._log_error_response(method, path, resp)
+                raise YouTrackError(f"{resp.status_code} {method} /{path}: {body}")
+
+            return resp.json() if resp.content else None
+
+        # Unreachable: the loop above always returns or raises before running
+        # out of attempts.
+        raise AssertionError("retry loop exited without returning or raising")
+
+    @staticmethod
+    async def _sleep_before_retry(attempt: int) -> None:
+        base = _BACKOFF_SCHEDULE[attempt - 1]
+        jitter = base * _JITTER_FRACTION
+        await asyncio.sleep(base + random.uniform(-jitter, jitter))
+
+    @staticmethod
+    def _retry_after_seconds(resp: httpx.Response) -> float | None:
+        header = resp.headers.get("Retry-After")
+        if header is None:
+            return None
+        try:
+            return float(header)
+        except ValueError:
+            # YouTrack is not expected to send the HTTP-date form; if it ever
+            # does, fall back to the normal backoff schedule rather than
+            # failing to parse it.
+            return None
 
     # -- reads ---------------------------------------------------------------
 

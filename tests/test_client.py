@@ -5,6 +5,7 @@ import logging
 import httpx
 import pytest
 
+import youtrack_mcp.client as client_module
 from youtrack_mcp.client import (
     ISSUE_DETAIL_FIELDS,
     ISSUE_LIST_FIELDS,
@@ -17,6 +18,24 @@ def _make_client(handler) -> YouTrackClient:
     return YouTrackClient(
         "https://yt.example.com/", "perm-test", transport=httpx.MockTransport(handler)
     )
+
+
+@pytest.fixture(autouse=True)
+def _no_real_sleep(monkeypatch):
+    """Retry/backoff tests would otherwise really wait ~0.5-1.5s per case.
+
+    Patch ``asyncio.sleep`` as seen from the client module so the retry loop
+    still awaits *something* (keeping it a real coroutine boundary) but tests
+    run instantly. Calls are recorded so tests can assert on the delay chosen
+    (e.g. that a 429's ``Retry-After`` was actually honoured).
+    """
+    calls = []
+
+    async def _fake_sleep(seconds):
+        calls.append(seconds)
+
+    monkeypatch.setattr(client_module.asyncio, "sleep", _fake_sleep)
+    return calls
 
 
 def test_api_url_strips_trailing_slash():
@@ -327,3 +346,131 @@ async def test_list_projects_requests_archived_field():
 
     assert "archived" in seen["fields"]
     assert "shortName" in seen["fields"]
+
+
+# -- retry/timeout policy (ADR-0002) -----------------------------------------
+
+
+async def test_get_retries_on_503_then_succeeds():
+    """GET has no side effects, so a transient 5xx is retried within budget."""
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(503, text="Service Unavailable")
+        return httpx.Response(200, json={"login": "klod"})
+
+    client = _make_client(handler)
+    result = await client.me()
+    await client.aclose()
+
+    assert calls["n"] == 2
+    assert result["login"] == "klod"
+
+
+async def test_post_does_not_retry_on_503():
+    """A 5xx on a side-effecting POST is fatal immediately: we can't tell
+    whether the issue was actually created before the error response, so a
+    blind retry risks creating it twice."""
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(503, text="Service Unavailable")
+
+    client = _make_client(handler)
+    with pytest.raises(YouTrackError, match="503"):
+        await client.create_issue("DEMO", "hi")
+    await client.aclose()
+
+    assert calls["n"] == 1
+
+
+async def test_post_does_not_retry_on_read_timeout():
+    """Same reasoning as the 503 case: a ReadTimeout means the request may
+    have already reached and been applied by the server."""
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    client = _make_client(handler)
+    with pytest.raises(YouTrackError):
+        await client.create_issue("DEMO", "hi")
+    await client.aclose()
+
+    assert calls["n"] == 1
+
+
+async def test_post_retries_on_connect_error():
+    """A ConnectError means the connection never established, i.e. the
+    request definitely wasn't sent yet — safe to retry even for a POST."""
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise httpx.ConnectError("connection refused", request=request)
+        return httpx.Response(200, json={"idReadable": "DEMO-1", "summary": "hi"})
+
+    client = _make_client(handler)
+    issue = await client.create_issue("DEMO", "hi")
+    await client.aclose()
+
+    assert calls["n"] == 2
+    assert issue["idReadable"] == "DEMO-1"
+
+
+async def test_429_honours_retry_after_header(_no_real_sleep):
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(429, headers={"Retry-After": "2"}, text="rate limited")
+        return httpx.Response(200, json={"login": "klod"})
+
+    client = _make_client(handler)
+    result = await client.me()
+    await client.aclose()
+
+    assert calls["n"] == 2
+    assert result["login"] == "klod"
+    assert _no_real_sleep == [2.0]  # header wins over the normal backoff schedule
+
+
+async def test_429_retry_after_beyond_ceiling_is_fatal(_no_real_sleep):
+    """A Retry-After above the ceiling must fail fast rather than block a
+    synchronous MCP tool-call for that long."""
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(429, headers={"Retry-After": "30"}, text="rate limited")
+
+    client = _make_client(handler)
+    with pytest.raises(YouTrackError, match="429"):
+        await client.me()
+    await client.aclose()
+
+    assert calls["n"] == 1
+    assert _no_real_sleep == []  # never waited
+
+
+async def test_retry_budget_exhausted_raises_last_error():
+    """Running out of the attempt budget raises the last error seen, not a
+    generic/swallowed failure."""
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(503, text=f"Service Unavailable (attempt {calls['n']})")
+
+    client = _make_client(handler)
+    with pytest.raises(YouTrackError, match="attempt 3"):
+        await client.me()
+    await client.aclose()
+
+    assert calls["n"] == 3  # 1 initial + 2 retries, then give up
