@@ -6,7 +6,12 @@ import httpx
 import pytest
 
 import youtrack_mcp.client as client_module
-from youtrack_mcp.client import YouTrackClient, YouTrackError
+from youtrack_mcp.client import (
+    ISSUE_DETAIL_FIELDS,
+    ISSUE_LIST_FIELDS,
+    YouTrackClient,
+    YouTrackError,
+)
 
 
 def _make_client(handler) -> YouTrackClient:
@@ -68,7 +73,71 @@ async def test_search_passes_query_and_top():
 
     assert seen["query"]["query"] == "for: me"
     assert seen["query"]["$top"] == "5"
+    assert seen["query"]["fields"] == ISSUE_LIST_FIELDS
     assert issues[0]["idReadable"] == "DEMO-1"
+
+
+async def test_search_issues_requests_list_fields_only():
+    """search_issues (list view: my_issues/search_issues) must request only
+    what format_issue_line reads — no description/project/reporter, and no
+    dead top-level fields (created/updated)."""
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["fields"] = dict(request.url.params)["fields"]
+        return httpx.Response(200, json=[])
+
+    client = _make_client(handler)
+    await client.search_issues("for: me")
+    await client.aclose()
+
+    fields = seen["fields"]
+    assert fields == ISSUE_LIST_FIELDS
+    # needed by format_issue_line / state_of
+    assert "idReadable" in fields
+    assert "summary" in fields
+    assert "resolved" in fields
+    assert "customFields(name,value(name,fullName,login,presentation,text))" in fields
+    # never read for the list view
+    assert "description" not in fields
+    assert "project" not in fields
+    assert "reporter" not in fields
+    # dead weight, never read at all
+    assert "created" not in fields
+    assert "updated" not in fields
+    assert "minutes" not in fields
+
+
+async def test_get_issue_requests_detail_fields():
+    """get_issue (detail view) must request everything format_issue_detail
+    reads, but drop dead fields: created/updated, reporter.fullName,
+    customFields.value.minutes."""
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["fields"] = dict(request.url.params)["fields"]
+        return httpx.Response(200, json={"idReadable": "DEMO-12"})
+
+    client = _make_client(handler)
+    await client.get_issue("DEMO-12")
+    await client.aclose()
+
+    fields = seen["fields"]
+    assert fields == ISSUE_DETAIL_FIELDS
+    # needed by format_issue_detail (and format_issue_line it calls)
+    assert "idReadable" in fields
+    assert "summary" in fields
+    assert "description" in fields
+    assert "resolved" in fields
+    assert "project(shortName,name)" in fields
+    assert "customFields(name,value(name,fullName,login,presentation,text))" in fields
+    # reporter.login is read, reporter.fullName is not
+    assert "reporter(login)" in fields
+    assert "reporter(login,fullName)" not in fields
+    # dead weight, never read at all
+    assert "created" not in fields
+    assert "updated" not in fields
+    assert "minutes" not in fields
 
 
 async def test_create_issue_body():
@@ -78,6 +147,7 @@ async def test_create_issue_body():
         import json
 
         seen["body"] = json.loads(request.content)
+        seen["fields"] = dict(request.url.params)["fields"]
         return httpx.Response(200, json={"idReadable": "DEMO-42", "summary": "hi"})
 
     client = _make_client(handler)
@@ -88,6 +158,9 @@ async def test_create_issue_body():
     assert seen["body"]["summary"] == "hi"
     assert seen["body"]["description"] == "body"
     assert issue["idReadable"] == "DEMO-42"
+    # create_issue's response is rendered like a detail view (format_issue_line
+    # + issue_url), so it uses the same detail selector as get_issue.
+    assert seen["fields"] == ISSUE_DETAIL_FIELDS
 
 
 async def test_apply_command_body_for_status_change():

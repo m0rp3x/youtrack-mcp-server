@@ -46,12 +46,24 @@ _RETRYABLE_ON_READ = (
 #: so those are fatal instead of risking a duplicate issue/command.
 _RETRYABLE_ON_WRITE = (httpx.ConnectError, httpx.ConnectTimeout)
 
-#: Field selector used whenever we fetch issues. YouTrack returns nothing unless
-#: fields are requested explicitly, so keep this in one place.
-ISSUE_FIELDS = (
-    "idReadable,summary,description,resolved,created,updated,"
-    "project(shortName,name),reporter(login,fullName),"
-    "customFields(name,value(name,fullName,login,presentation,text,minutes))"
+#: Field selectors used whenever we fetch issues. YouTrack returns nothing
+#: unless fields are requested explicitly, so keep these in one place.
+#:
+#: ``formatting.py`` renders two distinct views: ``format_issue_line`` (one
+#: line: id, state, summary, assignee) for list-y results, and
+#: ``format_issue_detail`` (adds project, reporter login, priority/type/due
+#: date, description) for a single issue. Each selector below requests only
+#: what its consumers actually read — no ``created``/``updated`` (never
+#: read), no ``reporter.fullName`` (only ``login`` is read), no
+#: ``customFields.value.minutes`` (never read).
+ISSUE_LIST_FIELDS = (
+    "idReadable,summary,resolved,"
+    "customFields(name,value(name,fullName,login,presentation,text))"
+)
+ISSUE_DETAIL_FIELDS = (
+    "idReadable,summary,description,resolved,"
+    "project(shortName,name),reporter(login),"
+    "customFields(name,value(name,fullName,login,presentation,text))"
 )
 COMMENT_FIELDS = "id,text,created,author(login,fullName)"
 PROJECT_FIELDS = "shortName,name,archived"
@@ -241,14 +253,16 @@ class YouTrackClient:
         )
 
     async def search_issues(
-        self, query: str, *, top: int = 30, fields: str = ISSUE_FIELDS
+        self, query: str, *, top: int = 30, fields: str = ISSUE_LIST_FIELDS
     ) -> list[dict[str, Any]]:
         """Return issues matching a YouTrack search ``query``."""
         return await self._request(
             "GET", "issues", params={"query": query, "fields": fields, "$top": top}
         )
 
-    async def get_issue(self, issue_id: str, *, fields: str = ISSUE_FIELDS) -> dict[str, Any]:
+    async def get_issue(
+        self, issue_id: str, *, fields: str = ISSUE_DETAIL_FIELDS
+    ) -> dict[str, Any]:
         """Fetch a single issue by readable (``DEMO-12``) or internal id."""
         return await self._request("GET", f"issues/{issue_id}", params={"fields": fields})
 
@@ -270,7 +284,9 @@ class YouTrackClient:
         body: dict[str, Any] = {"project": {"shortName": project}, "summary": summary}
         if description:
             body["description"] = description
-        return await self._request("POST", "issues", params={"fields": ISSUE_FIELDS}, json=body)
+        return await self._request(
+            "POST", "issues", params={"fields": ISSUE_DETAIL_FIELDS}, json=body
+        )
 
     async def apply_command(
         self, command: str, issues: list[str], comment: str | None = None
