@@ -7,9 +7,14 @@ for humans/LLMs lives in :mod:`youtrack_mcp.formatting`.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import httpx
+
+from .redact import redact_text
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT = 30.0
 
@@ -96,7 +101,15 @@ class YouTrackClient:
     ) -> Any:
         resp = await self._http().request(method, path, params=params, json=json)
         if resp.status_code >= 400:
-            raise YouTrackError(f"{resp.status_code} {method} /{path}: {resp.text[:500]}")
+            redacted_body = redact_text(resp.text)
+            # Full body (redacted) goes to the log for debugging; the exception
+            # message re-uses the same redacted text so a secret can't leak via
+            # either path.
+            logger.error(
+                "YouTrack API error: %s %s /%s -> %s: %s",
+                method, self.api_url, path, resp.status_code, redacted_body,
+            )
+            raise YouTrackError(f"{resp.status_code} {method} /{path}: {redacted_body}")
         return resp.json() if resp.content else None
 
     # -- reads ---------------------------------------------------------------

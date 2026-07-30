@@ -1,11 +1,13 @@
 """Admin/provisioning tests using a stubbed Hub transport (no network)."""
 
 import json
+import logging
 
 import httpx
 import pytest
 
 from youtrack_mcp.admin import AdminClient, AdminError
+from youtrack_mcp.redact import REDACTED
 
 SERVICES = {
     "services": [
@@ -96,3 +98,37 @@ async def test_error_surfaces():
     with pytest.raises(AdminError):
         await client.list_users()
     await client.aclose()
+
+
+async def test_create_token_error_body_is_logged_with_token_redacted(caplog):
+    """A create_token call that errors after minting a token (e.g. a flaky
+    downstream 5xx, or an API that echoes the request back on failure) must
+    still surface the full response body for debugging -- but never the raw
+    token value, in the log OR in the raised exception's message."""
+    fake_token = "perm-agent-token-should-not-appear-in-logs"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/hub/api/rest/services":
+            return httpx.Response(200, json=SERVICES)
+        if path == "/hub/api/rest/users/u1/permanenttokens":
+            # Simulate a backend that echoes the minted token even on a 5xx
+            # (e.g. partial success reported as an error downstream).
+            return httpx.Response(
+                500,
+                json={"error": "propagation failed", "token": fake_token},
+            )
+        return httpx.Response(404, text=path)
+
+    client = _hub(handler)
+    caplog.set_level(logging.ERROR)
+
+    with pytest.raises(AdminError) as exc_info:
+        await client.create_token("u1", "mcp-agent-a")
+    await client.aclose()
+
+    assert fake_token not in caplog.text
+    assert fake_token not in str(exc_info.value)
+    # The rest of the body stays visible for debugging.
+    assert "propagation failed" in caplog.text
+    assert REDACTED in caplog.text

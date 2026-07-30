@@ -15,10 +15,15 @@ retry. The MCP tools surface the error; a retry resolves it.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
+
+from .redact import redact_text
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT = 30.0
 GLOBAL_PROJECT_ID = "0"
@@ -98,7 +103,17 @@ class AdminClient:
     async def _request(self, method: str, path: str, **kw: Any) -> Any:
         resp = await self._http().request(method, path, **kw)
         if resp.status_code >= 400:
-            raise AdminError(f"{resp.status_code} {method} /{path}: {resp.text[:500]}")
+            # This is the Hub admin API: bodies here can legitimately contain
+            # a freshly-minted permanent token (create_token) or other secret
+            # fields. Redact before it touches a log line or an exception
+            # message -- both would otherwise leak it to anywhere errors get
+            # displayed or persisted.
+            redacted_body = redact_text(resp.text)
+            logger.error(
+                "Hub admin API error: %s %s /%s -> %s: %s",
+                method, self.hub_url, path, resp.status_code, redacted_body,
+            )
+            raise AdminError(f"{resp.status_code} {method} /{path}: {redacted_body}")
         return resp.json() if resp.content else None
 
     # -- lookups -------------------------------------------------------------
