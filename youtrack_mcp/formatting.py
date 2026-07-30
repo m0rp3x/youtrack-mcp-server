@@ -71,6 +71,18 @@ def format_issue_detail(issue: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def issue_url(base_url: str, issue: dict[str, Any]) -> str:
+    """Build the browser URL for an issue, e.g. ``https://yt.example.com/issue/DEMO-42``.
+
+    Args:
+        base_url: Instance base URL (``YOUTRACK_URL``), with or without a
+            trailing slash.
+        issue: Issue JSON as returned by the YouTrack API; must contain
+            ``idReadable``.
+    """
+    return f"{base_url.rstrip('/')}/issue/{issue.get('idReadable', '')}"
+
+
 def format_comment(comment: dict[str, Any]) -> str:
     """Render a created comment for confirmation output."""
     author = (comment.get("author") or {}).get("login", "?")

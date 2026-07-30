@@ -63,6 +63,11 @@ class YouTrackClient:
         """Fully-qualified REST API root, e.g. ``https://yt.example.com/api``."""
         return f"{self._base_url}/api"
 
+    @property
+    def base_url(self) -> str:
+        """Instance base URL (no trailing slash), e.g. ``https://yt.example.com``."""
+        return self._base_url
+
     def _http(self) -> httpx.AsyncClient:
         if self._client is None:
             # Trailing slash on base_url + slash-less relative paths keeps httpx

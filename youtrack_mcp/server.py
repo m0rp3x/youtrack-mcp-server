@@ -11,7 +11,7 @@ from mcp.server.fastmcp import FastMCP
 
 from .client import YouTrackClient
 from .config import load_config
-from .formatting import format_comment, format_issue_detail, format_issue_line
+from .formatting import format_comment, format_issue_detail, format_issue_line, issue_url
 
 mcp = FastMCP("youtrack")
 
@@ -87,8 +87,10 @@ async def create_issue(project: str, summary: str, description: str = "") -> str
         summary: Issue title.
         description: Optional Markdown body.
     """
-    issue = await _client_or_init().create_issue(project, summary, description or None)
-    return "Created " + format_issue_line(issue)
+    client = _client_or_init()
+    issue = await client.create_issue(project, summary, description or None)
+    url = issue_url(client.base_url, issue)
+    return "Created " + format_issue_line(issue) + f"\nurl: {url}"
 
 
 @mcp.tool()
