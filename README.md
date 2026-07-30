@@ -144,6 +144,42 @@ Then give each agent its own server block in that agent's MCP client config:
 }
 ```
 
+### Provisioning from code — `AdminClient.provision_agent`
+
+`youtrack-admin` is just a thin wrapper around `youtrack_mcp.admin.AdminClient` —
+an orchestrator that spins up agents on demand can call it directly instead of
+shelling out. `AdminClient` takes `base_url` / `admin_token` as constructor
+arguments (it does not read the process environment itself), so fetch the same
+two variables the CLI uses and pass them in:
+
+```python
+import asyncio
+import os
+
+from youtrack_mcp.admin import AdminClient
+
+YOUTRACK_URL = os.getenv("YOUTRACK_URL")              # e.g. https://your-youtrack.example.com
+YOUTRACK_ADMIN_TOKEN = os.getenv("YOUTRACK_ADMIN_TOKEN")  # an admin's permanent token
+
+
+async def main() -> None:
+    client = AdminClient(YOUTRACK_URL, YOUTRACK_ADMIN_TOKEN)
+    try:
+        agent = await client.provision_agent(
+            "agent-alpha", "Agent Alpha", role="contributor"
+        )
+        print(agent.login, agent.user_id, agent.token)  # token is minted fresh — store it now
+    finally:
+        await client.aclose()
+
+
+asyncio.run(main())
+```
+
+`provision_agent` is idempotent (create-or-reuse by `login`), grants the global
+role and mints a fresh permanent token every call — same behaviour as
+`youtrack-admin create-agent`, just callable from an orchestrator's own code.
+
 ### Assigning tasks to agents
 
 A global role lets an agent **create and work on** issues in every project. To
