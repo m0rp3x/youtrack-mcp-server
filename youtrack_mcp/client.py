@@ -14,6 +14,7 @@ from typing import Any
 
 import httpx
 
+from .http import bearer_headers
 from .redact import redact_text
 
 logger = logging.getLogger(__name__)
@@ -100,11 +101,7 @@ class YouTrackClient:
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
         self._transport = transport
-        self._headers = {
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-        }
+        self._headers = bearer_headers(token)
         self._client: httpx.AsyncClient | None = None
 
     @property
