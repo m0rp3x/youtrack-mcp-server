@@ -3,6 +3,7 @@
 from youtrack_mcp.formatting import (
     format_issue_detail,
     format_issue_line,
+    issue_url,
     state_of,
 )
 
@@ -49,3 +50,15 @@ def test_issue_detail_includes_metadata_and_description():
     assert "reporter: yura" in detail
     assert "priority: Critical" in detail
     assert "Steps to reproduce" in detail
+
+
+def test_issue_url_joins_base_url_and_id_readable():
+    assert issue_url("https://yt.example.com", ISSUE) == "https://yt.example.com/issue/DEMO-12"
+
+
+def test_issue_url_strips_trailing_slash_on_base_url():
+    assert issue_url("https://yt.example.com/", ISSUE) == "https://yt.example.com/issue/DEMO-12"
+
+
+def test_issue_url_handles_missing_id_readable():
+    assert issue_url("https://yt.example.com", {}) == "https://yt.example.com/issue/"
